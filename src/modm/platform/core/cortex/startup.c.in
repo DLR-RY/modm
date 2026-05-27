@@ -133,8 +133,6 @@ void __modm_startup(void)
 	// Call all constructors of static objects
 	table_call(__init_array_start, __init_array_end);
 
-	__enable_irq();
-
 	// Call the application's entry point
 	main();
 %#
