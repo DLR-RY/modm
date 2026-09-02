@@ -10,18 +10,28 @@
 // ----------------------------------------------------------------------------
 
 #include "flash.hpp"
-
-static constexpr uint32_t FLASH_SR_ERR = 0xfffe;
+#include <modm/architecture/interface/interrupt.hpp>
 
 namespace modm::platform
 {
 
+MODM_ISR(FLASH)
+{
+	Flash::interruptHandler();
+}
+
+volatile Flash::Status Flash::bankStatus[Flash::NumberOfBanks] = {Flash::Status::idle, Flash::Status::idle};
+
 bool
 Flash::unlock(uint8_t bank)
 {
-	Flash::enable();
 	if (isLocked(bank))
 	{
+		// only enable and clear interrupts if not yet in use
+		if(isLocked(getOtherBank(bank)))
+		{
+			enable();
+		}
 		if(1U == bank)
 		{
 			FLASH->KEYR1 = 0x45670123;
@@ -45,6 +55,12 @@ Flash::lock(uint8_t bank)
 	{
 		FLASH->CR2 |= FLASH_CR_LOCK;
 	}
+
+	if(isLocked(getOtherBank(bank)))
+	{
+		disable();
+	}
+
 	return isLocked(bank);
 }
 
@@ -52,17 +68,13 @@ modm_ramcode void
 Flash::initiateErase(uint8_t index)
 {
 	uint8_t bank = getBank(index);
+	Flash::bankStatus[bank-1] = Flash::Status::operationOngoing;
 	if(bank == 1)
 	{
-		FLASH->SR1 = FLASH_SR_ERR;
-		FLASH->CR1 = FLASH_CR_START | FLASH_CR_SER | (uint32_t)FLASH_CR_PSIZE_1 |
-				((index << FLASH_CR_SNB_Pos) & FLASH_CR_SNB_Msk);
-		
+		initErase(FLASH->CR1, index);
 	} else if(bank == 2)
 	{
-		FLASH->SR2 = FLASH_SR_ERR;
-		FLASH->CR2 = FLASH_CR_START | FLASH_CR_SER | (uint32_t)FLASH_CR_PSIZE_1 |
-				((index << FLASH_CR_SNB_Pos) & FLASH_CR_SNB_Msk);
+		initErase(FLASH->CR2, index);
 	}
 }
 
@@ -72,11 +84,13 @@ Flash::finalizeErase(uint8_t bank)
 	if(bank == 1)
 	{
 		FLASH->CR1 = 0;
-		return FLASH->SR1 & FLASH_SR_ERR;
+		bankStatus[0] = Status::idle;
+		return FLASH->SR1 & FLASH_SR_CCR_ERR;
 	} else if(bank == 2)
 	{
 		FLASH->CR2 = 0;
-		return FLASH->SR2 & FLASH_SR_ERR;
+		bankStatus[1] = Status::idle;
+		return FLASH->SR2 & FLASH_SR_CCR_ERR;
 	}
 	return 0xffff'ffff;
 }
@@ -85,17 +99,20 @@ Flash::finalizeErase(uint8_t bank)
 modm_ramcode void
 Flash::initiateProgram(uintptr_t addr, uintptr_t data)
 {
+	if((addr < OriginAddr) || ((addr + (FlashWord * sizeof(uint32_t))) > (OriginAddr + Size)))
+	{
+		return;
+	}
+
 	uint8_t bank = getBank(addr);
 	if(1U == bank)
 	{
-		FLASH->SR1 = FLASH_SR_ERR;
-		FLASH->CR1 = FLASH_CR_PG;
+		FLASH->CR1 |= (FLASH_CR_PG | FLASH_CR_EOPIE | FLASH_SR_CCR_ERR);
 	} else if(2U == bank)
 	{
-		FLASH->SR2 = FLASH_SR_ERR;
-		FLASH->CR2 = FLASH_CR_PG;
+		FLASH->CR2 = (FLASH_CR_PG | FLASH_CR_EOPIE | FLASH_SR_CCR_ERR);
 	}
-	
+	Flash::bankStatus[bank-1] = Flash::Status::operationOngoing;
 	for(size_t i = 0; i < FlashWord; i++)
 	{
 		*(uint32_t *) addr = *(uint32_t *)data;
@@ -109,14 +126,14 @@ Flash::finalizeProgram(uint8_t bank)
 {
 	if(1U == bank)
 	{
-		FLASH->SR1 |= FLASH_SR_EOP;
-		FLASH->CR1 &= ~FLASH_CR_PG;
-		return FLASH->SR1 & FLASH_SR_ERR;
+		FLASH->CR1 &= ~(FLASH_CR_PG | FLASH_CR_EOPIE);
+		bankStatus[0] = Status::idle;
+		return FLASH->SR1 & FLASH_SR_CCR_ERR;
 	} else if(2U == bank)
 	{
-		FLASH->SR2 |= FLASH_SR_EOP;
-		FLASH->CR2 &= ~FLASH_CR_PG;
-		return FLASH->SR2 & FLASH_SR_ERR;
+		FLASH->CR2 &= ~(FLASH_CR_PG | FLASH_CR_EOPIE);
+		bankStatus[1] = Status::idle;
+		return FLASH->SR2 & FLASH_SR_CCR_ERR;
 	}
 	return 0xFFFF'FFFF;
 }
