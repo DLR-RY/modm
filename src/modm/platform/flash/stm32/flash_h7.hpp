@@ -22,11 +22,22 @@ namespace modm::platform
 class Flash
 {
 public:
+	enum class Status : uint8_t
+	{
+		idle = 0,
+		operationOngoing = 1,
+		operationSuccess = 2,
+		operationFailed = 3
+	};
+
+	static constexpr uint32_t FLASH_SR_CCR_ERR = 0x1FEE0000;
+
 	static constexpr uintptr_t OriginAddr{0x8000000};
 	static constexpr size_t Size{0x200000};
 	static constexpr uint8_t SectorShift = 17U;
 	static constexpr size_t SectorSize = (1ul << 17);
 	static constexpr size_t FlashWord = 8U;
+	static constexpr size_t NumberOfBanks = 2U;
 
 	static inline uint8_t *const Origin{(uint8_t *)(OriginAddr)};
 
@@ -37,14 +48,52 @@ public:
 		B32 = FLASH_CR_PSIZE_1,
 	};
 
+private:
+
+	modm_always_inline static void
+	checkAndClear(uint32_t volatile& SR, uint32_t volatile& CCR, uint8_t bank)
+	{
+		if((SR & (FLASH_SR_EOP | FLASH_SR_CCR_ERR)))
+		{
+			if(SR & (FLASH_SR_QW | FLASH_SR_BSY))
+			{
+				Flash::bankStatus[bank] = Flash::Status::operationOngoing;
+			}
+			else if(SR & FLASH_SR_CCR_ERR) 
+			{
+				Flash::bankStatus[bank] = Flash::Status::operationFailed;
+			}
+			else
+			{
+				Flash::bankStatus[bank] = Flash::Status::operationSuccess;
+			}
+			CCR |= FLASH_CCR_CLR_EOP | FLASH_SR_CCR_ERR;
+		}
+	}
+
 public:
+	modm_always_inline static void
+	interruptHandler()
+	{
+		checkAndClear(FLASH->SR1, FLASH->CCR1, 0);
+		checkAndClear(FLASH->SR2, FLASH->CCR2, 1);
+	}
+
 	inline static void
 	enable()
-	{}
+	{
+		FLASH->CCR1 |= FLASH_CCR_CLR_EOP | FLASH_SR_CCR_ERR;
+		FLASH->CCR2 |= FLASH_CCR_CLR_EOP | FLASH_SR_CCR_ERR;
+		NVIC_EnableIRQ(FLASH_IRQn);
+		// we are just guessing a priority here, adapt if needed
+		NVIC_SetPriority(FLASH_IRQn, 5);
+	}
 
 	inline static void
 	disable()
-	{}
+	{
+		NVIC_DisableIRQ(FLASH_IRQn);
+	}
 
 	static bool
 	isLocked(uint8_t bank)
@@ -54,12 +103,10 @@ public:
 		return true;
 	}
 
-	static inline bool
-	isBusy(uint8_t bank)
+	static inline Status
+	getStatus(uint8_t bank)
 	{
-		if (bank == 1) { return FLASH->SR1 & (FLASH_SR_BSY | FLASH_SR_QW); }
-		if (bank == 2) { return FLASH->SR2 & (FLASH_SR_BSY | FLASH_SR_QW); }
-		return false;
+		return Flash::bankStatus[bank-1];
 	}
 
 	static bool
@@ -125,17 +172,42 @@ public:
 	static void
 	initiateErase(uint8_t sector);
 
+	/**
+	 * @brief Cleans up after an erase by setting the control register, bank status and doing final error checks
+	 * @param bankId Either 1 or 2 to control the corresponding bank
+	 * @return 0 if the error register is cleared, error bits otherwise
+	 */
 	static uint32_t
 	finalizeErase(uint8_t bankId);
-
-	static uint32_t
-	erase(uint8_t sector);
 
 	static void
 	initiateProgram(uintptr_t addr, uintptr_t data);
 
+	/**
+	 * @brief Cleans up after a program operation by setting the control register, bank status and doing final error checks
+	 * @param bankId Either 1 or 2 to control the corresponding bank
+	 * @return 0 if the error register is cleared, error bits otherwise
+	 */
 	static uint32_t
 	finalizeProgram(uint8_t bankId);
+
+private:
+	static inline void
+	initErase(uint32_t volatile& CR, uint8_t index)
+	{
+		CR = FLASH_CR_START | FLASH_CR_EOPIE | FLASH_CR_SER | 
+		        (uint32_t)FLASH_CR_PSIZE_1 | FLASH_SR_CCR_ERR |
+				((index << FLASH_CR_SNB_Pos) & FLASH_CR_SNB_Msk);
+	}
+
+	static inline uint8_t
+	getOtherBank(uint8_t bankId)
+	{
+		static_assert(NumberOfBanks == 2, "Other-Bank-check is only correct if flash has exactly two banks");
+		return bankId == 1 ? 2U : 1U;
+	}
+
+	static volatile Status bankStatus[NumberOfBanks];
 };
 
 }  // namespace modm::platform
