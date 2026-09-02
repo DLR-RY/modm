@@ -130,6 +130,12 @@ public:
 	ascii()
 	{ mode = Mode::Ascii; return *this; }
 
+	/// set the output mode to default (ASCII style for integer types)
+	/// Used for consistency to std::cout
+	inline IOStream&
+	dec()
+	{ return ascii(); }
+
 	// Types ------------------------------------------------------------------
 	IOStream&
 	operator << (const bool& v);
